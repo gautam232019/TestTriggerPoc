@@ -5,6 +5,7 @@ pipeline {
         stage('Print') {
             steps {
                 print("HELLO WORLD")  
+                
             }
         }
 }
