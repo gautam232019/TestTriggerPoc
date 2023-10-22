@@ -5,7 +5,7 @@ pipeline {
         stage('Trigger') {
             steps {
                  script {
-                    def changedDirectory = sh(script: 'git diff --name-only HEAD^ HEAD', returnStatus: true).trim()
+                    def changedDirectory = sh(script: 'git diff --name-only HEAD^ HEAD', returnStdout: true).trim()
 
                     if (changedDirectory.contains('AuthPoint')) {
                         build(job: 'Authpoint', wait: false)
