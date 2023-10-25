@@ -1,0 +1,632 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Creates a database and table in Athena.
+
+Parameters:
+  WorkGroupName:
+    Type: String
+    Description: Name of athena workgroup 
+  WorkgroupDescription:
+    Type: String
+    Description: The description of the database.
+  Dataperquerylimit:
+    Type: String
+    Description: per-query limit of data scanned by the query
+  DatabaseName:
+    Type: String
+    Description: The name of the database.
+  DatabaseDescription:
+    Type: String
+    Description: The description of the database.
+  TableName:
+    Type: String
+    Description: The name of the table.
+  TableDescription:
+    Type: String
+    Description: The description of the table.
+  S3BucketName:
+    Type: String
+    Description: Location bucket name
+    Default: wg-applog-allenvs
+  QueryResultBucket:
+    Type: String
+    Description: S3 bucket for query results
+
+Resources:
+  AthenaWorkgroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Description: !Ref WorkgroupDescription
+      Name: !Ref WorkGroupName
+      State: ENABLED
+      WorkGroupConfiguration:
+        EnforceWorkGroupConfiguration: true
+        BytesScannedCutoffPerQuery : !Ref Dataperquerylimit 
+        EngineVersion:
+          EffectiveEngineVersion: Athena engine version 3
+          SelectedEngineVersion: Athena engine version 3
+        PublishCloudWatchMetricsEnabled: true
+        ResultConfiguration:
+          OutputLocation: !Sub "s3://${QueryResultBucket}/"
+
+  AppLogsDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref 'AWS::AccountId'
+      DatabaseInput: 
+        Description: !Ref DatabaseDescription
+        Name: !Ref DatabaseName
+
+  AppLogsTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref 'AWS::AccountId'
+      DatabaseName: !Ref AppLogsDatabase
+      TableInput:
+        TableType: EXTERNAL_TABLE
+        Description: !Ref TableDescription
+        Name: !Ref TableName
+        PartitionKeys:
+          - Name: environment
+            Type: string
+          - Name: aws_region
+            Type: string
+          - Name: year
+            Type: int
+          - Name: month
+            Type: int
+          - Name: day
+            Type: int
+          - Name: hour
+            Type: int
+        StorageDescriptor:
+          Columns:
+            - Name: asctime
+              Type: string
+            - Name: region
+              Type: string
+            - Name: wgc_account_id
+              Type: string
+            - Name: request_id
+              Type: string
+            - Name: message
+              Type: string
+            - Name: logGroup
+              Type: string
+            - Name: service
+              Type: string
+            - Name: logStream
+              Type: string
+            - Name: component
+              Type: string
+            - Name: error_code
+              Type: string
+            - Name: error_alert
+              Type: string
+            - Name: level_name
+              Type: string
+            - Name: ts
+              Type: string
+            - Name: error_priority
+              Type: string
+            - Name: api_request_id
+              Type: string   
+          Location: !Sub "s3://${S3BucketName}/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+            Parameters:
+              { 
+                "case.insensitive": "false",
+                "mapping.ts" : "TIMESTAMP",
+                "mapping.loggroup" : "logGroup",
+                "mapping.logstream" : "logStream"
+              }
+
+  PrepareStatementSinceMinutes:
+    Type: AWS::Athena::PreparedStatement
+    Properties:
+      Description: "Prepared statement"
+      StatementName: since_minutes
+      WorkGroup: !Ref AthenaWorkgroup
+      QueryStatement: >
+        WITH timestamp_value AS (
+            SELECT date_add('minute', ?, current_timestamp) AS my_timestamp
+          )
+          SELECT loggroup,component,service,message,asctime,error_alert,error_code,error_priority,level_name
+          FROM application_logs
+          WHERE environment=? AND aws_region=? AND regexp_like(message,(?)) AND year >= EXTRACT (year FROM (SELECT my_timestamp from timestamp_value)) AND month >= EXTRACT (month FROM (SELECT my_timestamp from timestamp_value)) AND day >= EXTRACT (day FROM (SELECT my_timestamp from timestamp_value)) AND hour >= EXTRACT (hour FROM (SELECT my_timestamp from timestamp_value))
+          AND (
+            CASE
+              WHEN substr(asctime, 11, 1) = 'T'
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,15,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) = ' ' AND substr(asctime, 12, 1) = 'T' AND substr(asctime, 13, 1) = ' '
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,17,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) = ' '
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,15,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) != 'T'
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,14,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+            END
+          );
+
+  PrepareStatementSince5Minutes:
+    Type: AWS::Athena::PreparedStatement
+    Properties:
+      Description: "Prepared statement"
+      StatementName: since_5_minutes
+      WorkGroup: !Ref AthenaWorkgroup
+      QueryStatement: >
+        WITH timestamp_value AS (
+            SELECT date_add('minute', -5, current_timestamp) AS my_timestamp
+          )
+          SELECT loggroup,component,service,message,asctime,error_alert,error_code,error_priority,level_name
+          FROM application_logs
+          WHERE environment=? AND aws_region=? AND regexp_like(message,(?)) AND year >= EXTRACT (year FROM (SELECT my_timestamp from timestamp_value)) AND month >= EXTRACT (month FROM (SELECT my_timestamp from timestamp_value)) AND day >= EXTRACT (day FROM (SELECT my_timestamp from timestamp_value)) AND hour >= EXTRACT (hour FROM (SELECT my_timestamp from timestamp_value))
+          AND (
+            CASE
+              WHEN substr(asctime, 11, 1) = 'T'
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,15,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) = ' ' AND substr(asctime, 12, 1) = 'T' AND substr(asctime, 13, 1) = ' '
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,17,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) = ' '
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,15,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) != 'T'
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,14,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+            END
+          );
+
+  PrepareStatementSince15Minutes:
+    Type: AWS::Athena::PreparedStatement
+    Properties:
+      Description: "Prepared statement"
+      StatementName: since_15_minutes
+      WorkGroup: !Ref AthenaWorkgroup
+      QueryStatement: >
+          WITH timestamp_value AS (
+            SELECT date_add('minute', -15, current_timestamp) AS my_timestamp
+          )
+          SELECT loggroup,component,service,message,asctime,error_alert,error_code,error_priority,level_name
+          FROM application_logs
+          WHERE environment=? AND aws_region=? AND regexp_like(message,(?)) AND year >= EXTRACT (year FROM (SELECT my_timestamp from timestamp_value)) AND month >= EXTRACT (month FROM (SELECT my_timestamp from timestamp_value)) AND day >= EXTRACT (day FROM (SELECT my_timestamp from timestamp_value)) AND hour >= EXTRACT (hour FROM (SELECT my_timestamp from timestamp_value))
+          AND (
+            CASE
+              WHEN substr(asctime, 11, 1) = 'T'
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,15,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) = ' ' AND substr(asctime, 12, 1) = 'T' AND substr(asctime, 13, 1) = ' '
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,17,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) = ' '
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,15,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) != 'T'
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,14,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+            END
+          );
+
+  PrepareStatementSince30Minutes:
+    Type: AWS::Athena::PreparedStatement
+    Properties:
+      Description: "Prepared statement"
+      StatementName: since_30_minutes
+      WorkGroup: !Ref AthenaWorkgroup
+      QueryStatement: >
+          WITH timestamp_value AS (
+            SELECT date_add('minute', -30, current_timestamp) AS my_timestamp
+          )
+          SELECT loggroup,component,service,message,asctime,error_alert,error_code,error_priority,level_name
+          FROM application_logs
+          WHERE environment=? AND aws_region=? AND regexp_like(message,(?)) AND year >= EXTRACT (year FROM (SELECT my_timestamp from timestamp_value)) AND month >= EXTRACT (month FROM (SELECT my_timestamp from timestamp_value)) AND day >= EXTRACT (day FROM (SELECT my_timestamp from timestamp_value)) AND hour >= EXTRACT (hour FROM (SELECT my_timestamp from timestamp_value))
+          AND (
+            CASE
+              WHEN substr(asctime, 11, 1) = 'T'
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,15,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) = ' ' AND substr(asctime, 12, 1) = 'T' AND substr(asctime, 13, 1) = ' '
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,17,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) = ' '
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,15,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) != 'T'
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,14,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+            END
+          );
+
+  PrepareStatementSinceHours:
+    Type: AWS::Athena::PreparedStatement
+    Properties:
+      Description: "Prepared statement"
+      StatementName: since_hours
+      WorkGroup: !Ref AthenaWorkgroup
+      QueryStatement: >
+        WITH timestamp_value AS (
+            SELECT date_add('hour', ?, current_timestamp) AS my_timestamp
+          )
+          SELECT loggroup,component,service,message,asctime,error_alert,error_code,error_priority,level_name
+          FROM application_logs
+          WHERE environment=? AND aws_region=? AND regexp_like(message,(?)) AND year >= EXTRACT (year FROM (SELECT my_timestamp from timestamp_value)) AND month >= EXTRACT (month FROM (SELECT my_timestamp from timestamp_value)) AND day >= EXTRACT (day FROM (SELECT my_timestamp from timestamp_value)) AND hour >= EXTRACT (hour FROM (SELECT my_timestamp from timestamp_value))
+          AND (
+            CASE
+              WHEN substr(asctime, 11, 1) = 'T'
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,15,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) = ' ' AND substr(asctime, 12, 1) = 'T' AND substr(asctime, 13, 1) = ' '
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,17,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) = ' '
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,15,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) != 'T'
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,14,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+            END
+          );
+
+  PrepareStatementSince1Hour:
+    Type: AWS::Athena::PreparedStatement
+    Properties:
+      Description: "Prepared statement"
+      StatementName: since_1_hour
+      WorkGroup: !Ref AthenaWorkgroup
+      QueryStatement: >
+        WITH timestamp_value AS (
+            SELECT date_add('hour', -1, current_timestamp) AS my_timestamp
+          )
+          SELECT loggroup,component,service,message,asctime,error_alert,error_code,error_priority,level_name
+          FROM application_logs
+          WHERE environment=? AND aws_region=? AND regexp_like(message,(?)) AND year >= EXTRACT (year FROM (SELECT my_timestamp from timestamp_value)) AND month >= EXTRACT (month FROM (SELECT my_timestamp from timestamp_value)) AND day >= EXTRACT (day FROM (SELECT my_timestamp from timestamp_value)) AND hour >= EXTRACT (hour FROM (SELECT my_timestamp from timestamp_value))
+          AND (
+            CASE
+              WHEN substr(asctime, 11, 1) = 'T'
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,15,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) = ' ' AND substr(asctime, 12, 1) = 'T' AND substr(asctime, 13, 1) = ' '
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,17,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) = ' '
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,15,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) != 'T'
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,14,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+            END
+          );
+
+  PrepareStatementSince2Hours:
+    Type: AWS::Athena::PreparedStatement
+    Properties:
+      Description: "Prepared statement"
+      StatementName: since_2_hours
+      WorkGroup: !Ref AthenaWorkgroup
+      QueryStatement: >
+        WITH timestamp_value AS (
+            SELECT date_add('hour', -2, current_timestamp) AS my_timestamp
+          )
+          SELECT loggroup,component,service,message,asctime,error_alert,error_code,error_priority,level_name
+          FROM application_logs
+          WHERE environment=? AND aws_region=? AND regexp_like(message,(?)) AND year >= EXTRACT (year FROM (SELECT my_timestamp from timestamp_value)) AND month >= EXTRACT (month FROM (SELECT my_timestamp from timestamp_value)) AND day >= EXTRACT (day FROM (SELECT my_timestamp from timestamp_value)) AND hour >= EXTRACT (hour FROM (SELECT my_timestamp from timestamp_value))
+          AND (
+            CASE
+              WHEN substr(asctime, 11, 1) = 'T'
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,15,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) = ' ' AND substr(asctime, 12, 1) = 'T' AND substr(asctime, 13, 1) = ' '
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,17,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) = ' '
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,15,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) != 'T'
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,14,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+            END
+          );
+
+  PrepareStatementSince8Hours:
+    Type: AWS::Athena::PreparedStatement
+    Properties:
+      Description: "Prepared statement"
+      StatementName: since_8_hours
+      WorkGroup: !Ref AthenaWorkgroup
+      QueryStatement: >
+        WITH timestamp_value AS (
+            SELECT date_add('hour', -8, current_timestamp) AS my_timestamp
+          )
+          SELECT loggroup,component,service,message,asctime,error_alert,error_code,error_priority,level_name
+          FROM application_logs
+          WHERE environment=? AND aws_region=? AND regexp_like(message,(?)) AND year >= EXTRACT (year FROM (SELECT my_timestamp from timestamp_value)) AND month >= EXTRACT (month FROM (SELECT my_timestamp from timestamp_value)) AND day >= EXTRACT (day FROM (SELECT my_timestamp from timestamp_value)) AND hour >= EXTRACT (hour FROM (SELECT my_timestamp from timestamp_value))
+          AND (
+            CASE
+              WHEN substr(asctime, 11, 1) = 'T'
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,15,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) = ' ' AND substr(asctime, 12, 1) = 'T' AND substr(asctime, 13, 1) = ' '
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,17,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) = ' '
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,15,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) != 'T'
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,14,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+            END
+          );
+
+
+  PrepareStatementSinceDays:
+    Type: AWS::Athena::PreparedStatement
+    Properties:
+      Description: "Prepared statement"
+      StatementName: since_days
+      WorkGroup: !Ref AthenaWorkgroup
+      QueryStatement: >
+        WITH timestamp_value AS (
+              SELECT date_add('day', ?, current_timestamp) AS my_timestamp)
+          SELECT loggroup,component,service,message,asctime,error_alert,error_code,error_priority,level_name,(SELECT my_timestamp from timestamp_value)
+          FROM application_logs
+          WHERE environment=? AND aws_region=? AND year >= EXTRACT (year FROM (SELECT my_timestamp from timestamp_value)) AND month >= EXTRACT (month FROM (SELECT my_timestamp from timestamp_value)) AND day >= EXTRACT (day FROM (SELECT my_timestamp from timestamp_value))
+          AND (
+            CASE
+              WHEN substr(asctime, 11, 1) = 'T'
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,15,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) = ' ' AND substr(asctime, 12, 1) = 'T' AND substr(asctime, 13, 1) = ' '
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,17,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) = ' '
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,15,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) != 'T'
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,14,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+            END
+          ) AND regexp_like(message,(?));
+
+  PrepareStatementSince1Day:
+    Type: AWS::Athena::PreparedStatement
+    Properties:
+      Description: "Prepared statement"
+      StatementName: since_1_day
+      WorkGroup: !Ref AthenaWorkgroup
+      QueryStatement: >
+        WITH timestamp_value AS (
+              SELECT date_add('day', -1, current_timestamp) AS my_timestamp)
+          SELECT loggroup,component,service,message,asctime,error_alert,error_code,error_priority,level_name,(SELECT my_timestamp from timestamp_value)
+          FROM application_logs
+          WHERE environment=? AND aws_region=? AND year >= EXTRACT (year FROM (SELECT my_timestamp from timestamp_value)) AND month >= EXTRACT (month FROM (SELECT my_timestamp from timestamp_value)) AND day >= EXTRACT (day FROM (SELECT my_timestamp from timestamp_value))
+          AND (
+            CASE
+              WHEN substr(asctime, 11, 1) = 'T'
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,15,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) = ' ' AND substr(asctime, 12, 1) = 'T' AND substr(asctime, 13, 1) = ' '
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,17,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) = ' '
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,15,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) != 'T'
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,14,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+            END
+          ) AND regexp_like(message,(?));
+
+  PrepareStatementSince2Days:
+    Type: AWS::Athena::PreparedStatement
+    Properties:
+      Description: "Prepared statement"
+      StatementName: since_2_days
+      WorkGroup: !Ref AthenaWorkgroup
+      QueryStatement: >
+        WITH timestamp_value AS (
+              SELECT date_add('day', -2, current_timestamp) AS my_timestamp)
+          SELECT loggroup,component,service,message,asctime,error_alert,error_code,error_priority,level_name,(SELECT my_timestamp from timestamp_value)
+          FROM application_logs
+          WHERE environment=? AND aws_region=? AND year >= EXTRACT (year FROM (SELECT my_timestamp from timestamp_value)) AND month >= EXTRACT (month FROM (SELECT my_timestamp from timestamp_value)) AND day >= EXTRACT (day FROM (SELECT my_timestamp from timestamp_value))
+          AND (
+            CASE
+              WHEN substr(asctime, 11, 1) = 'T'
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,15,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) = ' ' AND substr(asctime, 12, 1) = 'T' AND substr(asctime, 13, 1) = ' '
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,17,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) = ' '
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,15,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) != 'T'
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,14,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+            END
+          ) AND regexp_like(message,(?));
+
+  PrepareStatementSince5Days:
+    Type: AWS::Athena::PreparedStatement
+    Properties:
+      Description: "Prepared statement"
+      StatementName: since_5_days
+      WorkGroup: !Ref AthenaWorkgroup
+      QueryStatement: >
+        WITH timestamp_value AS (
+              SELECT date_add('day', -5, current_timestamp) AS my_timestamp)
+          SELECT loggroup,component,service,message,asctime,error_alert,error_code,error_priority,level_name,(SELECT my_timestamp from timestamp_value)
+          FROM application_logs
+          WHERE environment=? AND aws_region=? AND year >= EXTRACT (year FROM (SELECT my_timestamp from timestamp_value)) AND month >= EXTRACT (month FROM (SELECT my_timestamp from timestamp_value)) AND day >= EXTRACT (day FROM (SELECT my_timestamp from timestamp_value))
+          AND (
+            CASE
+              WHEN substr(asctime, 11, 1) = 'T'
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,15,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) = ' ' AND substr(asctime, 12, 1) = 'T' AND substr(asctime, 13, 1) = ' '
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,17,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) = ' '
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,15,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) != 'T'
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,14,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+            END
+          ) AND regexp_like(message,(?));
+
+  PrepareStatementSince7Days:
+    Type: AWS::Athena::PreparedStatement
+    Properties:
+      Description: "Prepared statement"
+      StatementName: since_7_days
+      WorkGroup: !Ref AthenaWorkgroup
+      QueryStatement: >
+        WITH timestamp_value AS (
+              SELECT date_add('day', -7, current_timestamp) AS my_timestamp)
+          SELECT loggroup,component,service,message,asctime,error_alert,error_code,error_priority,level_name,(SELECT my_timestamp from timestamp_value)
+          FROM application_logs
+          WHERE environment=? AND aws_region=? AND year >= EXTRACT (year FROM (SELECT my_timestamp from timestamp_value)) AND month >= EXTRACT (month FROM (SELECT my_timestamp from timestamp_value)) AND day >= EXTRACT (day FROM (SELECT my_timestamp from timestamp_value))
+          AND (
+            CASE
+              WHEN substr(asctime, 11, 1) = 'T'
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,15,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) = ' ' AND substr(asctime, 12, 1) = 'T' AND substr(asctime, 13, 1) = ' '
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,17,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) = ' '
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,15,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) != 'T'
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,14,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+            END
+          ) AND regexp_like(message,(?));
+
+  PrepareStatementSince14Days:
+    Type: AWS::Athena::PreparedStatement
+    Properties:
+      Description: "Prepared statement"
+      StatementName: since_14_days
+      WorkGroup: !Ref AthenaWorkgroup
+      QueryStatement: >
+        WITH timestamp_value AS (
+              SELECT date_add('day', -14, current_timestamp) AS my_timestamp)
+          SELECT loggroup,component,service,message,asctime,error_alert,error_code,error_priority,level_name,(SELECT my_timestamp from timestamp_value)
+          FROM application_logs
+          WHERE environment=? AND aws_region=? AND year >= EXTRACT (year FROM (SELECT my_timestamp from timestamp_value)) AND month >= EXTRACT (month FROM (SELECT my_timestamp from timestamp_value)) AND day >= EXTRACT (day FROM (SELECT my_timestamp from timestamp_value))
+          AND (
+            CASE
+              WHEN substr(asctime, 11, 1) = 'T'
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,15,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) = ' ' AND substr(asctime, 12, 1) = 'T' AND substr(asctime, 13, 1) = ' '
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,17,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) = ' '
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,15,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) != 'T'
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,14,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+            END
+          ) AND regexp_like(message,(?));
+
+  PrepareStatementSince30Days:
+    Type: AWS::Athena::PreparedStatement
+    Properties:
+      Description: "Prepared statement"
+      StatementName: since_30_days
+      WorkGroup: !Ref AthenaWorkgroup
+      QueryStatement: >
+        WITH timestamp_value AS (
+              SELECT date_add('day', -30, current_timestamp) AS my_timestamp)
+          SELECT loggroup,component,service,message,asctime,error_alert,error_code,error_priority,level_name,(SELECT my_timestamp from timestamp_value)
+          FROM application_logs
+          WHERE environment=? AND aws_region=? AND year >= EXTRACT (year FROM (SELECT my_timestamp from timestamp_value)) AND month >= EXTRACT (month FROM (SELECT my_timestamp from timestamp_value)) AND day >= EXTRACT (day FROM (SELECT my_timestamp from timestamp_value))
+          AND (
+            CASE
+              WHEN substr(asctime, 11, 1) = 'T'
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,15,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) = ' ' AND substr(asctime, 12, 1) = 'T' AND substr(asctime, 13, 1) = ' '
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,17,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) = ' '
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,15,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) != 'T'
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,14,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+            END
+          ) AND regexp_like(message,(?));
+
+  PrepareStatementSinceMonths:
+    Type: AWS::Athena::PreparedStatement
+    Properties:
+      Description: "Prepared statement"
+      StatementName: since_months
+      WorkGroup: !Ref AthenaWorkgroup
+      QueryStatement: >
+        WITH timestamp_value AS (
+            SELECT date_add('month', ?, current_timestamp) AS my_timestamp
+          )
+          SELECT loggroup,component,service,message,asctime,error_alert,error_code,error_priority,level_name,(SELECT my_timestamp from timestamp_value),wgc_account_id
+          FROM application_logs
+          WHERE environment=? AND aws_region=? AND regexp_like(message,(?)) AND year >= EXTRACT (year FROM (SELECT my_timestamp from timestamp_value)) AND month >= EXTRACT (month FROM (SELECT my_timestamp from timestamp_value))
+          AND (
+            CASE
+              WHEN substr(asctime, 11, 1) = 'T'
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,15,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) = ' ' AND substr(asctime, 12, 1) = 'T' AND substr(asctime, 13, 1) = ' '
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,17,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) = ' '
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,15,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) != 'T'
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,14,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+            END
+          );
+
+  PrepareStatementSince1Month:
+    Type: AWS::Athena::PreparedStatement
+    Properties:
+      Description: "Prepared statement"
+      StatementName: since_1_month
+      WorkGroup: !Ref AthenaWorkgroup
+      QueryStatement: >
+        WITH timestamp_value AS (
+            SELECT date_add('month', -1, current_timestamp) AS my_timestamp
+          )
+          SELECT loggroup,component,service,message,asctime,error_alert,error_code,error_priority,level_name,(SELECT my_timestamp from timestamp_value),wgc_account_id
+          FROM application_logs
+          WHERE environment=? AND aws_region=? AND regexp_like(message,(?)) AND year >= EXTRACT (year FROM (SELECT my_timestamp from timestamp_value)) AND month >= EXTRACT (month FROM (SELECT my_timestamp from timestamp_value))
+          AND (
+            CASE
+              WHEN substr(asctime, 11, 1) = 'T'
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,15,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) = ' ' AND substr(asctime, 12, 1) = 'T' AND substr(asctime, 13, 1) = ' '
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,17,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) = ' '
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,15,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) != 'T'
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,14,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+            END
+          );
+
+  PrepareStatementSince2Months:
+    Type: AWS::Athena::PreparedStatement
+    Properties:
+      Description: "Prepared statement"
+      StatementName: since_2_months
+      WorkGroup: !Ref AthenaWorkgroup
+      QueryStatement: >
+        WITH timestamp_value AS (
+            SELECT date_add('month', -2, current_timestamp) AS my_timestamp
+          )
+          SELECT loggroup,component,service,message,asctime,error_alert,error_code,error_priority,level_name,(SELECT my_timestamp from timestamp_value),wgc_account_id
+          FROM application_logs
+          WHERE environment=? AND aws_region=? AND regexp_like(message,(?)) AND year >= EXTRACT (year FROM (SELECT my_timestamp from timestamp_value)) AND month >= EXTRACT (month FROM (SELECT my_timestamp from timestamp_value))
+          AND (
+            CASE
+              WHEN substr(asctime, 11, 1) = 'T'
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,15,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) = ' ' AND substr(asctime, 12, 1) = 'T' AND substr(asctime, 13, 1) = ' '
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,17,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) = ' '
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,15,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+              WHEN substr(asctime, 11, 1) != 'T'
+              THEN CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-', CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', substr(asctime,14,2)) AS timestamp) >= (SELECT my_timestamp from timestamp_value)
+            END
+          );
+
+  PrepareStatementBetweenTimestamps:
+    Type: AWS::Athena::PreparedStatement
+    Properties:
+      Description: "Prepared statement"
+      StatementName: between_time
+      WorkGroup: !Ref AthenaWorkgroup
+      QueryStatement: >
+        SELECT loggroup,component,service,message,asctime,error_alert,error_code,error_priority,level_name
+        FROM application_logs
+        WHERE environment=? AND aws_region=? AND CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-',CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', '00') AS timestamp) between CAST(? AS timestamp) AND CAST(? AS timestamp) and regexp_like(message,(?))
+
+  PrepareStatementDateEquals:
+    Type: AWS::Athena::PreparedStatement
+    Properties:
+      Description: "Prepared statement"
+      StatementName: date_equals
+      WorkGroup: !Ref AthenaWorkgroup
+      QueryStatement: >
+        SELECT loggroup,component,service,message,asctime,error_alert,error_code,error_priority,level_name
+        FROM application_logs
+        WHERE environment=? and aws_region=? and CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-',CAST(day AS varchar)) AS date) = CAST(? AS date) and regexp_like(message,(?));
+  
+  PrepareStatementTimestampEquals:
+    Type: AWS::Athena::PreparedStatement
+    Properties:
+      Description: "Prepared statement"
+      StatementName: timestamp_equals
+      WorkGroup: !Ref AthenaWorkgroup
+      QueryStatement: >
+        SELECT loggroup,component,service,message,asctime,error_alert,error_code,error_priority,level_name
+        FROM application_logs
+        WHERE environment=? and aws_region='us-west-2' and CAST(CONCAT(CAST(year AS varchar), '-', CAST(month AS varchar), '-',CAST(day AS varchar), ' ', CAST(hour AS varchar), ':', '00') AS timestamp) = CAST(? AS timestamp) and regexp_like(message,(?));
+
+Outputs:
+  DatabaseName:
+    Description: Database Name
+    Value: !Ref AppLogsDatabase
+
+  TableName:
+    Description: Table Name
+    Value: !Ref AppLogsTable
+
+
+        
+      
