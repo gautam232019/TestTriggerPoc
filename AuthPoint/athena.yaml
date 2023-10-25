@@ -1,8 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Creates a database and table in Athena.
-
-Parameters:
-  WorkGroupName:
+Description: Creates a database and table in Athena.  WorkGroupName:
     Type: String
     Description: Name of athena workgroup 
   WorkgroupDescription:
