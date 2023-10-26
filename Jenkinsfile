@@ -8,7 +8,7 @@ pipeline {
                     def changedDirectory = sh(script: 'git diff --name-only HEAD^ HEAD', returnStdout: true).trim()
                     print(changedDirectory)
 
-                    print($.payload)
+                    print($.pull_request)
 
                     if (changedDirectory.contains('AuthPoint')) {
                         build(job: 'Authpoint', wait: false)
